@@ -7,23 +7,44 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync"
+	"time"
 )
 
 type Coordinator struct {
 	// Your definitions here.
-	files   []string
-	nReduce int
+	files      []string
+	nReduce    int
+	mu         sync.Mutex
+	taskQueue  []string
+	inProgress []Task
+}
+
+type Task struct {
+	fileName  string
+	startTime time.Time
 }
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) TaskRequest(args *TaskRequestArgs, reply *TaskRequestReply) error {
 	fmt.Println("Coordinator: TaskRequest recieved successfully!")
-	reply.IsMapTask = true
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.taskQueue) == 0 {
+		// Need to somehow communicate that there is no task ready...
+		// Also differentiate between just waiting for one to open up
+		// and being done with the whole MR job
+		return nil
+	}
+	fileName := c.taskQueue[0]
+	c.inProgress = append(c.inProgress, Task{fileName, time.Now()})
+	reply.FileName = fileName
+	reply.Type = Map
 	reply.NReduce = c.nReduce
-	// TODO: For each TaskRequest, pick a file from c.files, associate it with this worker
-	// in a concurrency-safe map, along with it's start time?
-	reply.FileName = c.files[0]
-	// Gonna need to use channels here to communicate between workers and coordinator
+	c.taskQueue = c.taskQueue[1:]
+	// Gonna need to use RPC (more likely) or channels here to communicate
+	// between workers and coordinator
 	// Should it be owned/instantiated by the Coordinator or the Worker? hmm...
 	return nil
 }
@@ -64,9 +85,14 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
+	taskQueue := make([]string, len(files))
+	copy(taskQueue, files)
 	c := Coordinator{
 		files,
 		nReduce,
+		sync.Mutex{},
+		taskQueue,
+		make([]Task, len(files)),
 	}
 
 	// Your code here.

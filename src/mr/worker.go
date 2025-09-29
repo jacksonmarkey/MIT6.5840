@@ -1,10 +1,14 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"net/rpc"
+	"os"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -26,23 +30,72 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-	args := TaskRequestArgs{}
-	reply := TaskRequestReply{}
+OuterLoop:
+	for {
+		args := TaskRequestArgs{}
+		reply := TaskRequestReply{}
 
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.TaskRequest", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply %v\n", reply)
-	} else {
-		fmt.Printf("call failed!\n")
+		ok := call("Coordinator.TaskRequest", &args, &reply)
+		if ok {
+			fmt.Printf("reply %v\n", reply)
+		} else {
+			fmt.Printf("call failed!\n")
+			time.Sleep(time.Second)
+		}
+		switch reply.Type {
+		case Map:
+			ExecuteMapTask(mapf, reply)
+		case Reduce:
+			ExecuteReduceTask(reducef, reply)
+		case Done:
+			break OuterLoop
+		}
 	}
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
+
+}
+
+func ExecuteMapTask(mapf func(string, string) []KeyValue,
+	reply TaskRequestReply) {
+
+	intermediate := []KeyValue{}
+	fileName := reply.FileName
+	file, err := os.Open(fileName)
+	if err != nil {
+		log.Fatalf("cannot open %v", fileName)
+	}
+	content, err := io.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", fileName)
+	}
+	defer file.Close()
+	kva := mapf(fileName, string(content))
+	intermediate = append(intermediate, kva...)
+
+	enc := make([]*json.Encoder, reply.NReduce)
+	for i := 0; i < reply.NReduce; i++ {
+		outFileName := fmt.Sprintf("out-%v-%v", fileName, i)
+		outFile, err := os.Create(outFileName)
+		if err != nil {
+			log.Fatalf("cannot open %v", outFileName)
+		}
+		defer outFile.Close()
+		enc[i] = json.NewEncoder(outFile)
+	}
+
+	for _, kv := range intermediate {
+		outTaskNumber := ihash(kv.Key) % reply.NReduce
+		err := enc[outTaskNumber].Encode(&kv)
+		if err != nil {
+			log.Fatalf("cannot write %v from file %v", kv, fileName)
+		}
+	}
+}
+
+func ExecuteReduceTask(reducef func(string, []string) string,
+	reply TaskRequestReply) {
 
 }
 

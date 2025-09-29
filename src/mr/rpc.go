@@ -29,10 +29,18 @@ type TaskRequestArgs struct {
 }
 
 type TaskRequestReply struct {
-	IsMapTask bool
-	FileName  string
-	NReduce   int
+	Type     TaskType
+	FileName string
+	NReduce  int
 }
+
+type TaskType int
+
+const (
+	Map TaskType = iota
+	Reduce
+	Done
+)
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
