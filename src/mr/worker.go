@@ -30,9 +30,16 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	var previousTaskType TaskType
+	var previousTaskID int
+	var previousTaskComplete bool
 OuterLoop:
 	for {
-		args := TaskRequestArgs{}
+		args := TaskRequestArgs{
+			PreviousTaskID:       previousTaskID,
+			PreviousTaskType:     previousTaskType,
+			PreviousTaskComplete: previousTaskComplete,
+		}
 		reply := TaskRequestReply{}
 
 		ok := call("Coordinator.TaskRequest", &args, &reply)
@@ -41,12 +48,25 @@ OuterLoop:
 		} else {
 			fmt.Printf("call failed!\n")
 			time.Sleep(time.Second)
+			previousTaskID = 0
+			previousTaskType = Map
+			previousTaskComplete = false
+			continue
 		}
+
+		previousTaskID = reply.TaskID
+		previousTaskType = reply.Type
+		previousTaskComplete = false
+
 		switch reply.Type {
 		case Map:
 			ExecuteMapTask(mapf, reply)
+			previousTaskComplete = true
 		case Reduce:
 			ExecuteReduceTask(reducef, reply)
+			previousTaskComplete = true
+		case Wait:
+			time.Sleep(time.Second)
 		case Done:
 			break OuterLoop
 		}
@@ -60,36 +80,51 @@ OuterLoop:
 func ExecuteMapTask(mapf func(string, string) []KeyValue,
 	reply TaskRequestReply) {
 
-	intermediate := []KeyValue{}
-	fileName := reply.FileName
-	file, err := os.Open(fileName)
+	// Read input from file
+	inputFilePath := reply.Files[0]
+	file, err := os.Open(inputFilePath)
 	if err != nil {
-		log.Fatalf("cannot open %v", fileName)
-	}
-	content, err := io.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", fileName)
+		log.Fatalf("cannot open %v", inputFilePath)
 	}
 	defer file.Close()
-	kva := mapf(fileName, string(content))
-	intermediate = append(intermediate, kva...)
+	content, err := io.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", inputFilePath)
+	}
 
+	// Compute map function on input
+	mapOutput := []KeyValue{}
+	kva := mapf(inputFilePath, string(content))
+	mapOutput = append(mapOutput, kva...)
+
+	// Write map output to nReduce buckets
+	outFiles := make([]*os.File, reply.NReduce)
 	enc := make([]*json.Encoder, reply.NReduce)
 	for i := 0; i < reply.NReduce; i++ {
-		outFileName := fmt.Sprintf("out-%v-%v", fileName, i)
-		outFile, err := os.Create(outFileName)
+		outFileName := fmt.Sprintf("out-%v-%v-tmp", reply.TaskID, i)
+		outFile, err := os.CreateTemp("", outFileName)
 		if err != nil {
 			log.Fatalf("cannot open %v", outFileName)
 		}
 		defer outFile.Close()
+		outFiles[i] = outFile
 		enc[i] = json.NewEncoder(outFile)
 	}
 
-	for _, kv := range intermediate {
-		outTaskNumber := ihash(kv.Key) % reply.NReduce
-		err := enc[outTaskNumber].Encode(&kv)
+	for _, kv := range mapOutput {
+		bucketNumber := ihash(kv.Key) % reply.NReduce
+		err := enc[bucketNumber].Encode(&kv)
 		if err != nil {
-			log.Fatalf("cannot write %v from file %v", kv, fileName)
+			log.Fatalf("cannot write %v from file %v", kv, inputFilePath)
+		}
+	}
+
+	for bucketNumber, outFile := range outFiles {
+		oldName := outFile.Name()
+		newName := fmt.Sprintf("mr-map-out-%v-%v", reply.TaskID, bucketNumber)
+		err := os.Rename(oldName, newName)
+		if err != nil {
+			log.Fatalf("cannot rename %v to %v", oldName, newName)
 		}
 	}
 }
@@ -97,6 +132,42 @@ func ExecuteMapTask(mapf func(string, string) []KeyValue,
 func ExecuteReduceTask(reducef func(string, []string) string,
 	reply TaskRequestReply) {
 
+	// Open files containing output from the map
+	reduceInput := make(map[string][]string)
+	files := reply.Files
+
+	for _, fileName := range files {
+		file, err := os.Open(fileName)
+		if err != nil {
+			log.Fatalf("cannot open %v", fileName)
+		}
+		defer file.Close()
+		dec := json.NewDecoder(file)
+		// Collect key-value pairs by key
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			reduceInput[kv.Key] = append(reduceInput[kv.Key], kv.Value)
+		}
+	}
+
+	oname := fmt.Sprintf("mr-out-%v-%v", reply.NReduce, reply.TaskID)
+	ofile, _ := os.CreateTemp("", oname)
+	defer ofile.Close()
+
+	for key, values := range reduceInput {
+		output := reducef(key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", key, output)
+	}
+	newName := fmt.Sprintf("mr-out-%v", reply.NReduce)
+	err := os.Rename(ofile.Name(), newName)
+	if err != nil {
+		log.Fatalf("cannot rename %v to %v", ofile.Name(), newName)
+	}
 }
 
 // example function to show how to make an RPC call to the coordinator.
