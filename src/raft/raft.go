@@ -174,28 +174,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		return
 	}
-	// Technically, if we're in the same term as the candidate sending us the RequestVote RPC, then either:
-	// 1. We triggered our own term update by becoming a candidate, and we've already voted for ourselves
-	// 2. We received a RequestVote RPC from another candidate of this term, updated our term, and already voted
-	// 3. We received an AppendEntries RPC from the leader who already won the election for this term,
-	// 		which whether or not we voted for them they won the election and this new candidate has no chance
-	// 		and it doesn't matter if we give them the vote
-	// Thus, if we are in the same term, we want to reject the vote
-	// if args.Term == rf.currentTerm {
-	// 	if rf.votedFor != -1 {
-	// 		// we already voted this term, reject it
-	// 		reply.VoteGranted = false
-	// 	} else {
-	// 		reply.VoteGranted = true
-	// 		rf.votedFor = args.CandidateID
-	// 		rf.lastHeartbeat = time.Now()
-	// 	}
-	// }
-	if args.Term == rf.currentTerm && rf.votedFor != -1 {
+	if args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateID {
 		// we already voted this term, reject it
 		reply.VoteGranted = false
 		return
 	}
+	// Update our server term, even if we withhold our vote due to log term restrictions
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = Follower
+	}
+
 	lastLogIndex := len(rf.log) - 1
 	lastLogTerm := rf.log[lastLogIndex].Term
 	// reject if our log is more up-to-date
@@ -210,9 +199,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// If none of the above executed, then we give our vote
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateID
-	rf.currentTerm = args.Term
 	rf.lastHeartbeat = time.Now()
-	rf.state = Follower
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -379,6 +366,7 @@ func (rf *Raft) ticker() {
 		lastHeartbeat := rf.lastHeartbeat
 		isleader := (rf.state == Leader)
 		if !isleader && time.Since(lastHeartbeat) > rf.electionTimeOut {
+			rf.lastHeartbeat = time.Now()
 			go rf.kickoffElection()
 		}
 		rf.mu.Unlock()
@@ -417,8 +405,10 @@ type AppendEntriesArgs struct {
 
 // field names must start with capital letters!
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 // AppendEntries RPC handler.
@@ -436,17 +426,38 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// TODO: Move lock out of resetheartbeat function
 	// so we can call it in here instead of directly resetting?
 	rf.lastHeartbeat = time.Now()
-	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if args.PrevLogIndex >= len(rf.log) {
+		reply.ConflictIndex = len(rf.log)
 		reply.Success = false
 		return
 	}
-	if len(args.Entries) > 0 {
-		DPrintf("[%v] added to log: {Index: %v, Term: %v}", rf.me, len(rf.log), args.Entries[0].Term)
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+		i := args.PrevLogIndex - 1
+		for i >= 0 {
+			if rf.log[i].Term != reply.ConflictTerm {
+				break
+			}
+			i--
+		}
+		reply.ConflictIndex = i + 1
+		reply.Success = false
+		return
 	}
-	rf.log = rf.log[:args.PrevLogIndex+1]
-	rf.log = append(rf.log, args.Entries...)
+	for i, entry := range args.Entries {
+		index := args.PrevLogIndex + 1 + i
+		if index >= len(rf.log) || rf.log[index].Term != entry.Term {
+			rf.log = rf.log[:index]
+			rf.log = append(rf.log, args.Entries[i:]...)
+			break
+		}
+	}
 	if args.LeaderCommit > rf.commitIndex {
+		lastNewEntryIndex := args.PrevLogIndex + len(args.Entries)
 		rf.commitIndex = args.LeaderCommit
+		if lastNewEntryIndex < args.LeaderCommit {
+			rf.commitIndex = lastNewEntryIndex
+		}
 	}
 	reply.Success = true
 }
@@ -499,14 +510,24 @@ func (rf *Raft) lead(startTerm int) {
 						// TODO: decide whether to rate limit all AppendEntries RPCs
 						// to 10RPC/sec, or if we can sendback and forth if they're being
 						// rejected by followers, so that we find the right matchIndex faster
-						rf.nextIndex[peerID] -= 1
+						for i := len(rf.log) - 1; i >= 0; i-- {
+							if rf.log[i].Term == reply.ConflictTerm {
+								rf.nextIndex[peerID] = i + 1
+								break
+							}
+							if rf.log[i].Term < reply.ConflictTerm {
+								rf.nextIndex[peerID] = reply.ConflictIndex
+								break
+							}
+						}
 						rf.mu.Unlock()
+						time.Sleep(10 * time.Millisecond)
 						continue
 						// currently, this skips the time.Sleep() at the end of the loop
 					}
 					if reply.Success {
 						rf.nextIndex[peerID] = len(rf.log)
-						rf.matchIndex[peerID] = len(rf.log) - 1
+						rf.matchIndex[peerID] = args.PrevLogIndex + len(args.Entries)
 					}
 				}
 				rf.mu.Unlock()
