@@ -28,6 +28,15 @@ import (
 	"6.5840/labrpc"
 )
 
+const (
+	LEADER                = "leader"
+	FOLLOWER              = "follower"
+	CANDIDATE             = "candidate"
+	HEARTBEAT_INTERVAL    = 110
+	MIN_ELECTION_INTERVAL = 400
+	MAX_ELECTION_INTERVAL = 500
+)
+
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
@@ -78,12 +87,6 @@ type LogEntry struct {
 	Term    int
 }
 
-const (
-	Leader    = "leader"
-	Follower  = "follower"
-	Candidate = "candidate"
-)
-
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -93,7 +96,7 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (3A).
 	rf.mu.Lock()
 	term = rf.currentTerm
-	isleader = (rf.state == Leader)
+	isleader = (rf.state == LEADER)
 	rf.mu.Unlock()
 	return term, isleader
 }
@@ -238,7 +241,7 @@ func (rf *Raft) kickoffElection() {
 	// increment term, change to candidate, and vote for self
 	electionTerm := rf.currentTerm + 1
 	rf.currentTerm = electionTerm
-	rf.state = Candidate
+	rf.state = CANDIDATE
 	rf.votedFor = rf.me
 	voteCount := 1
 	// prepare remaining RequestVote RPC args
@@ -280,11 +283,11 @@ func (rf *Raft) kickoffElection() {
 			if reply.VoteGranted {
 				rf.mu.Lock()
 				// check that we're stlil in this election's term
-				if rf.currentTerm == electionTerm && rf.state == Candidate {
+				if rf.currentTerm == electionTerm && rf.state == CANDIDATE {
 					voteCount += 1
 					if voteCount > len(rf.peers)/2 {
 						DPrintf("(Term:%v)[%v] elected leader!", rf.currentTerm, rf.me)
-						rf.state = Leader
+						rf.state = LEADER
 						rf.nextIndex = make([]int, len(rf.peers))
 						rf.matchIndex = make([]int, len(rf.peers))
 						for i := 0; i < len(rf.nextIndex); i++ {
@@ -321,7 +324,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	index = len(rf.log)
 	term = rf.currentTerm
-	isLeader = (rf.state == Leader)
+	isLeader = (rf.state == LEADER)
 	if isLeader {
 		newLogEntry := LogEntry{
 			Command: command,
@@ -360,7 +363,7 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 		rf.mu.Lock()
 		lastHeartbeat := rf.lastHeartbeat
-		isleader := (rf.state == Leader)
+		isleader := (rf.state == LEADER)
 		if !isleader && time.Since(lastHeartbeat) > rf.electionTimeOut {
 			rf.resetElectionTimeOutLocked()
 			go rf.kickoffElection()
@@ -468,7 +471,7 @@ func (rf *Raft) lead(startTerm int) {
 		go func() {
 			for rf.killed() == false {
 				rf.mu.Lock()
-				if rf.state != Leader || rf.currentTerm != startTerm {
+				if rf.state != LEADER || rf.currentTerm != startTerm {
 					rf.mu.Unlock()
 					break
 				}
@@ -490,7 +493,7 @@ func (rf *Raft) lead(startTerm int) {
 				ok := rf.sendAppendEntries(peerID, &args, &reply)
 				rf.mu.Lock()
 				// Don't know what happened while we waited for the RPC, so check this again
-				if ok && rf.state == Leader && rf.currentTerm == startTerm {
+				if ok && rf.state == LEADER && rf.currentTerm == startTerm {
 					// check success and update accordingly
 					if reply.Term > rf.currentTerm {
 						rf.convertToFollowerLocked(reply.Term)
@@ -523,7 +526,7 @@ func (rf *Raft) lead(startTerm int) {
 				}
 				rf.mu.Unlock()
 				// wait between sending rounds of heartbeats
-				time.Sleep(150 * time.Millisecond)
+				time.Sleep(HEARTBEAT_INTERVAL * time.Millisecond)
 			}
 		}()
 	}
@@ -532,7 +535,7 @@ func (rf *Raft) lead(startTerm int) {
 func (rf *Raft) commitTicker(startTerm int) {
 	for rf.killed() == false {
 		rf.mu.Lock()
-		if rf.currentTerm != startTerm || rf.state != Leader {
+		if rf.currentTerm != startTerm || rf.state != LEADER {
 			rf.mu.Unlock()
 			return
 		}
@@ -566,15 +569,14 @@ func (rf *Raft) commitTicker(startTerm int) {
 
 // only call this function if we already have the lock!!!
 func (rf *Raft) resetElectionTimeOutLocked() {
-	min, max := 500, 750
-	n := rand.Intn(max-min) + min
+	n := MIN_ELECTION_INTERVAL + rand.Intn(MAX_ELECTION_INTERVAL-MIN_ELECTION_INTERVAL)
 	rf.electionTimeOut = time.Duration(n) * time.Millisecond
 	rf.lastHeartbeat = time.Now()
 }
 
 // only call this function if we already have the lock!!!
 func (rf *Raft) convertToFollowerLocked(term int) {
-	rf.state = Follower
+	rf.state = FOLLOWER
 	rf.currentTerm = term
 	rf.resetElectionTimeOutLocked()
 }
@@ -597,7 +599,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (3A, 3B, 3C).
 	rf.applyCh = applyCh
-	rf.state = Follower
+	rf.state = FOLLOWER
 	rf.log = make([]LogEntry, 1)
 	rf.log[0] = LogEntry{
 		Term:    0,
