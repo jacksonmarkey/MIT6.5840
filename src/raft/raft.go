@@ -183,6 +183,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = Follower
+		rf.resetElectionTimeOutLocked()
 	}
 
 	lastLogIndex := len(rf.log) - 1
@@ -199,7 +200,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// If none of the above executed, then we give our vote
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateID
-	rf.lastHeartbeat = time.Now()
+	rf.resetElectionTimeOutLocked()
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -271,11 +272,11 @@ func (rf *Raft) kickoffElection() {
 				rf.mu.Lock()
 				// We need this second check in case we've already incremented our term
 				// and are a candidate or leader for a later term. We don't want to
-				// accidentally demote ourself to follower for another election
-				// if this goroutine is stale
+				// accidentally demote ourself to follower in a future term election
 				if reply.Term > rf.currentTerm {
 					rf.state = Follower
 					rf.currentTerm = reply.Term
+					rf.resetElectionTimeOutLocked()
 				}
 				rf.mu.Unlock()
 				return
@@ -286,7 +287,7 @@ func (rf *Raft) kickoffElection() {
 				if rf.currentTerm == electionTerm && rf.state == Candidate {
 					voteCount += 1
 					if voteCount > len(rf.peers)/2 {
-						DPrintf("[%v] elected leader!", rf.me)
+						DPrintf("(Term:%v)[%v] elected leader!", rf.currentTerm, rf.me)
 						rf.state = Leader
 						rf.nextIndex = make([]int, len(rf.peers))
 						rf.matchIndex = make([]int, len(rf.peers))
@@ -326,7 +327,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term = rf.currentTerm
 	isLeader = (rf.state == Leader)
 	if isLeader {
-		DPrintf("[%v] added to log: {Index: %v, Term: %v}", rf.me, len(rf.log), term)
 		newLogEntry := LogEntry{
 			Command: command,
 			Term:    term,
@@ -366,7 +366,7 @@ func (rf *Raft) ticker() {
 		lastHeartbeat := rf.lastHeartbeat
 		isleader := (rf.state == Leader)
 		if !isleader && time.Since(lastHeartbeat) > rf.electionTimeOut {
-			rf.lastHeartbeat = time.Now()
+			rf.resetElectionTimeOutLocked()
 			go rf.kickoffElection()
 		}
 		rf.mu.Unlock()
@@ -423,9 +423,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.state = Follower
 	rf.currentTerm = leaderTerm
-	// TODO: Move lock out of resetheartbeat function
-	// so we can call it in here instead of directly resetting?
-	rf.lastHeartbeat = time.Now()
+	rf.resetElectionTimeOutLocked()
 	if args.PrevLogIndex >= len(rf.log) {
 		reply.ConflictIndex = len(rf.log)
 		reply.Success = false
@@ -503,6 +501,7 @@ func (rf *Raft) lead(startTerm int) {
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.state = Follower
+						rf.resetElectionTimeOutLocked()
 						rf.mu.Unlock()
 						return
 					}
@@ -563,6 +562,7 @@ func (rf *Raft) commitTicker(startTerm int) {
 				}
 			}
 			if count > len(rf.peers)/2 {
+				DPrintf("(Term:%v)[%v] set commitIndex (%v)->(%v)", rf.currentTerm, rf.me, rf.commitIndex, N)
 				rf.commitIndex = N
 				break
 			}
@@ -572,13 +572,12 @@ func (rf *Raft) commitTicker(startTerm int) {
 	}
 }
 
-func (rf *Raft) resetElectionTimeOut() {
+// only call this function if we already have the lock!!!
+func (rf *Raft) resetElectionTimeOutLocked() {
 	min, max := 500, 750
 	n := rand.Intn(max-min) + min
-	rf.mu.Lock()
 	rf.electionTimeOut = time.Duration(n) * time.Millisecond
 	rf.lastHeartbeat = time.Now()
-	rf.mu.Unlock()
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -605,7 +604,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		Term:    0,
 		Command: struct{}{},
 	}
-	rf.resetElectionTimeOut()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -615,6 +613,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start goroutine to send apply messages
 	go rf.applyMsgTicker()
+
+	// start election timeout
+	rf.resetElectionTimeOutLocked()
 
 	return rf
 }
