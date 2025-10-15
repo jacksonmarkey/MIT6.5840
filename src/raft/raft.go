@@ -181,9 +181,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	// Update our server term, even if we withhold our vote due to log term restrictions
 	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.state = Follower
-		rf.resetElectionTimeOutLocked()
+		rf.convertToFollowerLocked(args.Term)
 	}
 
 	lastLogIndex := len(rf.log) - 1
@@ -274,9 +272,7 @@ func (rf *Raft) kickoffElection() {
 				// and are a candidate or leader for a later term. We don't want to
 				// accidentally demote ourself to follower in a future term election
 				if reply.Term > rf.currentTerm {
-					rf.state = Follower
-					rf.currentTerm = reply.Term
-					rf.resetElectionTimeOutLocked()
+					rf.convertToFollowerLocked(reply.Term)
 				}
 				rf.mu.Unlock()
 				return
@@ -421,9 +417,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-	rf.state = Follower
-	rf.currentTerm = leaderTerm
-	rf.resetElectionTimeOutLocked()
+	rf.convertToFollowerLocked(leaderTerm)
 	if args.PrevLogIndex >= len(rf.log) {
 		reply.ConflictIndex = len(rf.log)
 		reply.Success = false
@@ -499,9 +493,7 @@ func (rf *Raft) lead(startTerm int) {
 				if ok && rf.state == Leader && rf.currentTerm == startTerm {
 					// check success and update accordingly
 					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						rf.state = Follower
-						rf.resetElectionTimeOutLocked()
+						rf.convertToFollowerLocked(reply.Term)
 						rf.mu.Unlock()
 						return
 					}
@@ -578,6 +570,13 @@ func (rf *Raft) resetElectionTimeOutLocked() {
 	n := rand.Intn(max-min) + min
 	rf.electionTimeOut = time.Duration(n) * time.Millisecond
 	rf.lastHeartbeat = time.Now()
+}
+
+// only call this function if we already have the lock!!!
+func (rf *Raft) convertToFollowerLocked(term int) {
+	rf.state = Follower
+	rf.currentTerm = term
+	rf.resetElectionTimeOutLocked()
 }
 
 // the service or tester wants to create a Raft server. the ports
