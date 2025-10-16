@@ -422,6 +422,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.convertToFollowerLocked(leaderTerm)
 	if args.PrevLogIndex >= len(rf.log) {
+		reply.ConflictTerm = -1
 		reply.ConflictIndex = len(rf.log)
 		reply.Success = false
 		return
@@ -504,6 +505,11 @@ func (rf *Raft) lead(startTerm int) {
 						// TODO: decide whether to rate limit all AppendEntries RPCs
 						// to 10RPC/sec, or if we can sendback and forth if they're being
 						// rejected by followers, so that we find the right matchIndex faster
+						if reply.ConflictTerm == -1 {
+							rf.nextIndex[peerID] = reply.ConflictIndex
+							rf.mu.Unlock()
+							continue
+						}
 						for i := len(rf.log) - 1; i >= 0; i-- {
 							if rf.log[i].Term == reply.ConflictTerm {
 								rf.nextIndex[peerID] = i + 1
@@ -515,7 +521,6 @@ func (rf *Raft) lead(startTerm int) {
 							}
 						}
 						rf.mu.Unlock()
-						time.Sleep(10 * time.Millisecond)
 						continue
 						// currently, this skips the time.Sleep() at the end of the loop
 					}
