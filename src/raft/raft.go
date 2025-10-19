@@ -19,12 +19,15 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -87,6 +90,13 @@ type LogEntry struct {
 	Term    int
 }
 
+func init() {
+	// DPrintf("initializing...")
+	labgob.Register(LogEntry{})
+	labgob.Register(int(0))
+	labgob.Register(struct{}{})
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -117,6 +127,14 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(rf.currentTerm) != nil || e.Encode(rf.votedFor) != nil || e.Encode(rf.log) != nil {
+		fmt.Println("Encoding error!")
+	}
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
+	// DPrintf("Successfully persisted [%v]={ currentTerm:%v, votedFor: %v, log: %v}\n", rf.me, rf.currentTerm, rf.votedFor, rf.log)
 }
 
 // restore previously persisted state.
@@ -137,6 +155,18 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		fmt.Println("Decoding error!")
+	}
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.log = log
+	// DPrintf("Successfully read persisted state of [%v]={ currentTerm:%v, votedFor: %v, log: %v}\n", rf.me, rf.currentTerm, rf.votedFor, rf.log)
 }
 
 // the service says it has created a snapshot that has
@@ -201,6 +231,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// If none of the above executed, then we give our vote
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateID
+	rf.persist()
 	rf.resetElectionTimeOutLocked()
 }
 
@@ -240,9 +271,11 @@ func (rf *Raft) kickoffElection() {
 	rf.mu.Lock()
 	// increment term, change to candidate, and vote for self
 	electionTerm := rf.currentTerm + 1
+	DPrintf("[%v].term(%v)->(%v), starting election", rf.me, rf.currentTerm, electionTerm)
 	rf.currentTerm = electionTerm
 	rf.state = CANDIDATE
 	rf.votedFor = rf.me
+	rf.persist()
 	voteCount := 1
 	// prepare remaining RequestVote RPC args
 	candidateID := rf.me
@@ -331,6 +364,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:    term,
 		}
 		rf.log = append(rf.log, newLogEntry)
+		rf.persist()
 	}
 	rf.mu.Unlock()
 
@@ -420,7 +454,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
+	rf.resetElectionTimeOutLocked()
+	if leaderTerm > rf.currentTerm || rf.state != FOLLOWER {
 	rf.convertToFollowerLocked(leaderTerm)
+	}
 	if args.PrevLogIndex >= len(rf.log) {
 		reply.ConflictTerm = -1
 		reply.ConflictIndex = len(rf.log)
@@ -445,6 +482,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if index >= len(rf.log) || rf.log[index].Term != entry.Term {
 			rf.log = rf.log[:index]
 			rf.log = append(rf.log, args.Entries[i:]...)
+			rf.persist()
 			break
 		}
 	}
@@ -456,6 +494,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 	reply.Success = true
+	rf.resetElectionTimeOutLocked()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -562,7 +601,7 @@ func (rf *Raft) commitTicker(startTerm int) {
 				}
 			}
 			if count > len(rf.peers)/2 {
-				DPrintf("(Term:%v)[%v] set commitIndex (%v)->(%v)", rf.currentTerm, rf.me, rf.commitIndex, N)
+				// DPrintf("(Term:%v)[%v] set commitIndex (%v)->(%v)", rf.currentTerm, rf.me, rf.commitIndex, N)
 				rf.commitIndex = N
 				break
 			}
@@ -583,6 +622,7 @@ func (rf *Raft) resetElectionTimeOutLocked() {
 func (rf *Raft) convertToFollowerLocked(term int) {
 	rf.state = FOLLOWER
 	rf.currentTerm = term
+	rf.persist()
 	rf.resetElectionTimeOutLocked()
 }
 
