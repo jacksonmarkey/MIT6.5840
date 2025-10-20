@@ -529,25 +529,29 @@ func (rf *Raft) lead(startTerm int) {
 					LeaderCommit: rf.commitIndex,
 				}
 				rf.mu.Unlock()
+				go func() {
+					// TODO: check that this is the most recently sent AppendEntries RPC and that we're correctly updating nextIndex, matchIndex, etc.
+					// start := time.Now()
 				reply := AppendEntriesReply{}
 				ok := rf.sendAppendEntries(peerID, &args, &reply)
+					// DPrintf("[%v]->[%v] AppendEntries took %vms", rf.me, peerID, time.Since(start).Milliseconds())
 				rf.mu.Lock()
+					defer rf.mu.Unlock()
 				// Don't know what happened while we waited for the RPC, so check this again
 				if ok && rf.state == LEADER && rf.currentTerm == startTerm {
 					// check success and update accordingly
 					if reply.Term > rf.currentTerm {
 						rf.convertToFollowerLocked(reply.Term)
-						rf.mu.Unlock()
+							return
+						}
+						// check if unordered stale reply from a retry after a hanging RPC call
+						if args.PrevLogIndex != rf.nextIndex[peerID]-1 {
 						return
 					}
 					if !reply.Success {
-						// TODO: decide whether to rate limit all AppendEntries RPCs
-						// to 10RPC/sec, or if we can sendback and forth if they're being
-						// rejected by followers, so that we find the right matchIndex faster
 						if reply.ConflictTerm == -1 {
 							rf.nextIndex[peerID] = reply.ConflictIndex
-							rf.mu.Unlock()
-							continue
+								return
 						}
 						for i := len(rf.log) - 1; i >= 0; i-- {
 							if rf.log[i].Term == reply.ConflictTerm {
@@ -559,16 +563,13 @@ func (rf *Raft) lead(startTerm int) {
 								break
 							}
 						}
-						rf.mu.Unlock()
-						continue
-						// currently, this skips the time.Sleep() at the end of the loop
+							return
 					}
-					if reply.Success {
+						// otherwise, success
 						rf.nextIndex[peerID] = len(rf.log)
 						rf.matchIndex[peerID] = args.PrevLogIndex + len(args.Entries)
 					}
-				}
-				rf.mu.Unlock()
+				}()
 				// wait between sending rounds of heartbeats
 				time.Sleep(HEARTBEAT_INTERVAL * time.Millisecond)
 			}
