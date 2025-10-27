@@ -84,9 +84,10 @@ type Raft struct {
 	matchIndex      []int
 	applyCh         chan ApplyMsg
 
-	snapshot          []byte
-	lastSnapshotIndex int
-	lastSnapshotTerm  int
+	snapshot           []byte
+	lastSnapshotIndex  int
+	lastSnapshotTerm   int
+	hasSnapshotToApply bool
 }
 
 type LogEntry struct {
@@ -193,7 +194,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// ignore stale or redundant snapshots
-	DPrintf("[%v] taking snapshot at index=%v\n\n\n", rf.me, index)
+	DPrintf("[%v] taking snapshot at index=%v", rf.me, index)
 	if index <= rf.lastSnapshotIndex {
 		return
 	}
@@ -205,9 +206,53 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	DPrintf("indexDelta = %v", indexDelta)
 	rf.log = rf.log[indexDelta:]
 	rf.lastSnapshotIndex = index
+	rf.lastSnapshotTerm = rf.log[0].Term
 	rf.snapshot = snapshot
 	rf.persist()
-	DPrintf("[%v] successful snapshot", rf.me)
+	DPrintf("[%v] successful snapshot, len(log)=%v", rf.me, len(rf.log))
+}
+
+type ApplySnapshotArgs struct {
+	Term              int
+	LeaderID          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type ApplySnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) ApplySnapshot(args *ApplySnapshotArgs, reply *ApplySnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("[%v]->[%v] applying snapshot... args=%+v", args.LeaderID, rf.me, args)
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+	if args.Term > rf.currentTerm || rf.state != FOLLOWER {
+		rf.convertToFollowerLocked(args.Term)
+	}
+	if args.LastIncludedIndex <= rf.commitIndex {
+		return
+	}
+	i := args.LastIncludedIndex - rf.lastSnapshotIndex
+	if i >= 0 && i < len(rf.log) && rf.log[i].Term == args.LastIncludedTerm {
+		return
+	}
+	rf.snapshot = args.Data
+	rf.log = make([]LogEntry, 1)
+	rf.log[0] = LogEntry{Term: args.LastIncludedTerm, Command: struct{}{}}
+	rf.lastApplied = args.LastIncludedIndex
+	rf.commitIndex = args.LastIncludedIndex
+	rf.lastSnapshotIndex = args.LastIncludedIndex
+	rf.lastSnapshotTerm = args.LastIncludedTerm
+	rf.hasSnapshotToApply = true
+	DPrintf("[%v] Snapshot apply queued: now commitIndex=%v, lastApplied=%v, len_log=%v", rf.me, rf.commitIndex, rf.lastApplied, len(rf.log))
+	rf.persist()
+	rf.resetElectionTimeOutLocked()
 }
 
 // example RequestVote RPC arguments structure.
@@ -249,8 +294,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.convertToFollowerLocked(args.Term)
 	}
 
-	lastLogIndex := len(rf.log) - 1
-	lastLogTerm := rf.log[lastLogIndex].Term
+	lastLogIndex := len(rf.log) - 1 + rf.lastSnapshotIndex
+	lastLogTerm := rf.log[len(rf.log)-1].Term
 	// reject if our log is more up-to-date
 	if lastLogTerm > args.LastLogTerm {
 		reply.VoteGranted = false
@@ -451,6 +496,15 @@ func (rf *Raft) applyMsgTicker() {
 		// DPrintf("[%v] applyMsgTicker() Acquired Lock", rf.me)
 		// DPrintf("lastApplied=%v, commitIndex=%v, lastSnapshotIndex=%v\n", rf.lastApplied, rf.commitIndex, rf.lastSnapshotIndex)
 		// DPrintf("log_length = %v", len(rf.log))
+		if rf.hasSnapshotToApply {
+			DPrintf("Applying snapshot...")
+			msgQueue = append(msgQueue, ApplyMsg{
+				SnapshotValid: true,
+				Snapshot:      rf.snapshot,
+				SnapshotTerm:  rf.lastSnapshotTerm,
+				SnapshotIndex: rf.lastSnapshotIndex,
+			})
+		}
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 			msg := ApplyMsg{
 				CommandValid: true,
@@ -467,6 +521,7 @@ func (rf *Raft) applyMsgTicker() {
 			// DPrintf("[%v] Applied %v!\n", rf.me, i)
 			// DPrintf("[%v]")
 		}
+		rf.hasSnapshotToApply = false
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
 		for _, msg := range msgQueue {
@@ -568,9 +623,35 @@ func (rf *Raft) lead(startTerm int) {
 				nextIndex := rf.nextIndex[peerID]
 				if nextIndex <= rf.lastSnapshotIndex {
 					// TODO: send ApplySnapshot RPC
-					DPrintf("!!!! need to implement applysnapshotRPC")
+					args := ApplySnapshotArgs{
+						Term:              rf.currentTerm,
+						LeaderID:          rf.me,
+						LastIncludedIndex: rf.lastSnapshotIndex,
+						LastIncludedTerm:  rf.lastSnapshotTerm,
+						Data:              rf.snapshot,
+					}
+					reply := ApplySnapshotReply{}
+					go func() {
+						DPrintf("[%v]->[%v] ApplySnapshotRPC, nextIndex=%v, lastSnapshotIndex=%v", rf.me, peerID, nextIndex, rf.lastSnapshotIndex)
+						ok := rf.peers[peerID].Call("Raft.ApplySnapshot", &args, &reply)
+						DPrintf("[%v]->[%v] complete, reply=%+v", rf.me, peerID, reply)
+						if ok {
+							rf.mu.Lock()
+							if startTerm < reply.Term {
+								if rf.currentTerm < reply.Term {
+									rf.convertToFollowerLocked(reply.Term)
+								}
+								rf.mu.Unlock()
+								return
+							}
+							rf.matchIndex[peerID] = args.LastIncludedIndex
+							rf.nextIndex[peerID] = rf.lastSnapshotIndex + len(rf.log)
+							rf.mu.Unlock()
+						}
+					}()
 					rf.mu.Unlock()
-					break
+					time.Sleep(HEARTBEAT_INTERVAL * time.Millisecond)
+					continue
 				}
 				var entries []LogEntry
 				if nextIndex < len(rf.log)+rf.lastSnapshotIndex {
@@ -587,12 +668,12 @@ func (rf *Raft) lead(startTerm int) {
 				rf.mu.Unlock()
 				go func() {
 					// TODO: check that this is the most recently sent AppendEntries RPC and that we're correctly updating nextIndex, matchIndex, etc.
-					start := time.Now()
+					// start := time.Now()
 					reply := AppendEntriesReply{}
 					ok := rf.sendAppendEntries(peerID, &args, &reply)
-					DPrintf("[%v]->[%v] AppendEntries.Success=%v, took %vms", rf.me, peerID, reply.Success, time.Since(start).Milliseconds())
+					// DPrintf("[%v]->[%v] AppendEntries.Success=%v, took %vms", rf.me, peerID, reply.Success, time.Since(start).Milliseconds())
 					rf.mu.Lock()
-					DPrintf("[%v] lead()2 Acquired Lock", rf.me)
+					// DPrintf("[%v] lead()2 Acquired Lock", rf.me)
 					defer rf.mu.Unlock()
 					// Don't know what happened while we waited for the RPC, so check this again
 					if ok && rf.state == LEADER && rf.currentTerm == startTerm {
@@ -708,25 +789,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		Term:    0,
 		Command: struct{}{},
 	}
-	rf.lastSnapshotIndex = 0 // TODO: or -1
+	// initialize from state persisted before a crash
+	if rf.persister.RaftStateSize() > 0 {
+		rf.readPersist(persister.ReadRaftState())
+		DPrintf("[%v] persisted from state", rf.me)
+		DPrintf("[%v]={len(log)=%v, lastSnapshotIndex=%v, ...}", rf.me, len(rf.log), rf.lastSnapshotIndex)
+	}
+
 	if persister.SnapshotSize() > 0 {
 		DPrintf("Reading snapshot...")
 		rf.snapshot = persister.ReadSnapshot()
-	}
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
-
-	if rf.snapshot != nil {
-		DPrintf("Applying snapshot...")
-		rf.applyCh <- ApplyMsg{
-			CommandValid:  false,
-			SnapshotValid: true,
-			Snapshot:      rf.snapshot,
-			SnapshotIndex: rf.lastSnapshotIndex,
-			SnapshotTerm:  rf.lastSnapshotTerm,
-		}
-		DPrintf("Snapshot applied!")
+		rf.lastApplied = rf.lastSnapshotIndex
+		rf.commitIndex = rf.lastSnapshotIndex
+		rf.hasSnapshotToApply = true
+		DPrintf("[%v] Snapshot apply queued, commitIndex=%v, lastApplied=%v, len_log=%v", rf.me, rf.commitIndex, rf.lastApplied, len(rf.log))
 	}
 
 	// start ticker goroutine to start elections
