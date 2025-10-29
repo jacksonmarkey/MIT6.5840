@@ -557,7 +557,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-	// TODO: check edge cases around index boundaries here?
 	if rf.log[args.PrevLogIndex-rf.lastSnapshotIndex].Term != args.PrevLogTerm {
 		reply.ConflictTerm = rf.log[args.PrevLogIndex-rf.lastSnapshotIndex].Term
 		i := args.PrevLogIndex - 1 - rf.lastSnapshotIndex
@@ -610,7 +609,6 @@ func (rf *Raft) lead(startTerm int) {
 				}
 				nextIndex := rf.nextIndex[peerID]
 				if nextIndex <= rf.lastSnapshotIndex {
-					// TODO: send ApplySnapshot RPC
 					args := ApplySnapshotArgs{
 						Term:              rf.currentTerm,
 						LeaderID:          rf.me,
@@ -655,7 +653,6 @@ func (rf *Raft) lead(startTerm int) {
 				}
 				rf.mu.Unlock()
 				go func() {
-					// TODO: check that this is the most recently sent AppendEntries RPC and that we're correctly updating nextIndex, matchIndex, etc.
 					// start := time.Now()
 					reply := AppendEntriesReply{}
 					ok := rf.sendAppendEntries(peerID, &args, &reply)
