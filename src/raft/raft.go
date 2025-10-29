@@ -432,7 +432,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (3B).
 	rf.mu.Lock()
-	DPrintf("[%v] Start() Acquired Lock", rf.me)
 
 	index = len(rf.log) + rf.lastSnapshotIndex
 	term = rf.currentTerm
@@ -493,9 +492,6 @@ func (rf *Raft) applyMsgTicker() {
 	for rf.killed() == false {
 		rf.mu.Lock()
 		var msgQueue = make([]ApplyMsg, 0)
-		// DPrintf("[%v] applyMsgTicker() Acquired Lock", rf.me)
-		// DPrintf("lastApplied=%v, commitIndex=%v, lastSnapshotIndex=%v\n", rf.lastApplied, rf.commitIndex, rf.lastSnapshotIndex)
-		// DPrintf("log_length = %v", len(rf.log))
 		if rf.hasSnapshotToApply {
 			DPrintf("Applying snapshot...")
 			msgQueue = append(msgQueue, ApplyMsg{
@@ -512,14 +508,6 @@ func (rf *Raft) applyMsgTicker() {
 				CommandIndex: i,
 			}
 			msgQueue = append(msgQueue, msg)
-			// DPrintf("[%v] Applying %v...\n%+v\n", rf.me, i, msg)
-			// rf.applyCh <- ApplyMsg{
-			// 	CommandValid: true,
-			// 	Command:      rf.log[i-rf.lastSnapshotIndex].Command,
-			// 	CommandIndex: i,
-			// }
-			// DPrintf("[%v] Applied %v!\n", rf.me, i)
-			// DPrintf("[%v]")
 		}
 		rf.hasSnapshotToApply = false
 		rf.lastApplied = rf.commitIndex
@@ -632,9 +620,9 @@ func (rf *Raft) lead(startTerm int) {
 					}
 					reply := ApplySnapshotReply{}
 					go func() {
-						DPrintf("[%v]->[%v] ApplySnapshotRPC, nextIndex=%v, lastSnapshotIndex=%v", rf.me, peerID, nextIndex, rf.lastSnapshotIndex)
+						// DPrintf("[%v]->[%v] ApplySnapshotRPC, nextIndex=%v, lastSnapshotIndex=%v", rf.me, peerID, nextIndex, rf.lastSnapshotIndex)
 						ok := rf.peers[peerID].Call("Raft.ApplySnapshot", &args, &reply)
-						DPrintf("[%v]->[%v] complete, reply=%+v", rf.me, peerID, reply)
+						// DPrintf("[%v]->[%v] complete, reply=%+v", rf.me, peerID, reply)
 						if ok {
 							rf.mu.Lock()
 							if startTerm < reply.Term {
