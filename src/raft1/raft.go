@@ -52,6 +52,7 @@ type Raft struct {
 	nextIndex       []int
 	matchIndex      []int
 	applyCh         chan raftapi.ApplyMsg
+	notifyApplyCh   chan struct{}
 
 	snapshot           []byte
 	lastSnapshotIndex  int
@@ -225,6 +226,7 @@ func (rf *Raft) ApplySnapshot(args *ApplySnapshotArgs, reply *ApplySnapshotReply
 	rf.lastSnapshotIndex = args.LastIncludedIndex
 	rf.lastSnapshotTerm = args.LastIncludedTerm
 	rf.hasSnapshotToApply = true
+	rf.notifyApplier()
 	DPrintf("[%v] Snapshot apply queued: now commitIndex=%v, lastApplied=%v, len_log=%v", rf.me, rf.commitIndex, rf.lastApplied, len(rf.log))
 	rf.persist()
 	rf.resetElectionTimeOutLocked()
@@ -438,6 +440,7 @@ func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	close(rf.applyCh)
+	close(rf.notifyApplyCh)
 }
 
 func (rf *Raft) killed() bool {
@@ -468,8 +471,26 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) notifyApplier() {
+	select {
+	case rf.notifyApplyCh <- struct{}{}:
+		// Successfully sent notification
+	default:
+		// Channel already has a pending notification, skip
+	}
+}
+
 func (rf *Raft) applyMsgTicker() {
 	for rf.killed() == false {
+		select {
+		case <-rf.notifyApplyCh:
+			// Something to apply, continue below
+		case <-time.After(10 * time.Millisecond):
+			// Periodic check in case we missed a notification
+		}
+		if rf.killed() {
+			return
+		}
 		rf.mu.Lock()
 		var msgQueue = make([]raftapi.ApplyMsg, 0)
 		if rf.hasSnapshotToApply {
@@ -495,7 +516,6 @@ func (rf *Raft) applyMsgTicker() {
 		for _, msg := range msgQueue {
 			rf.applyCh <- msg
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -707,6 +727,7 @@ func (rf *Raft) commitTicker(startTerm int) {
 			if count > len(rf.peers)/2 {
 				DPrintf("(Term:%v)[%v] set commitIndex (%v)->(%v)", rf.currentTerm, rf.me, rf.commitIndex, N+rf.lastSnapshotIndex)
 				rf.commitIndex = N + rf.lastSnapshotIndex
+				rf.notifyApplier()
 				break
 			}
 		}
@@ -754,6 +775,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		Term:    0,
 		Command: struct{}{},
 	}
+	rf.notifyApplyCh = make(chan struct{}, 1)
 	// initialize from state persisted before a crash
 	if rf.persister.RaftStateSize() > 0 {
 		rf.readPersist(persister.ReadRaftState())
@@ -767,6 +789,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.lastApplied = rf.lastSnapshotIndex
 		rf.commitIndex = rf.lastSnapshotIndex
 		rf.hasSnapshotToApply = true
+		rf.notifyApplier()
 		DPrintf("[%v] Snapshot apply queued, commitIndex=%v, lastApplied=%v, len_log=%v", rf.me, rf.commitIndex, rf.lastApplied, len(rf.log))
 	}
 
