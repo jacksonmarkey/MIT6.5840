@@ -24,7 +24,8 @@ const (
 	LEADER                = "leader"
 	FOLLOWER              = "follower"
 	CANDIDATE             = "candidate"
-	HEARTBEAT_INTERVAL    = 110
+	COMMIT_INTERVAL       = 10
+	HEARTBEAT_INTERVAL    = 35
 	MIN_ELECTION_INTERVAL = 400
 	MAX_ELECTION_INTERVAL = 500
 )
@@ -494,7 +495,7 @@ func (rf *Raft) applyMsgTicker() {
 		for _, msg := range msgQueue {
 			rf.applyCh <- msg
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -710,7 +711,7 @@ func (rf *Raft) commitTicker(startTerm int) {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(COMMIT_INTERVAL * time.Millisecond)
 	}
 }
 
