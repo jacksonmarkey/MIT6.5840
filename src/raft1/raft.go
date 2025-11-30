@@ -212,10 +212,12 @@ func (rf *Raft) ApplySnapshot(args *ApplySnapshotArgs, reply *ApplySnapshotReply
 		rf.convertToFollowerLocked(args.Term)
 	}
 	if args.LastIncludedIndex <= rf.commitIndex {
+		rf.resetElectionTimeOutLocked()
 		return
 	}
 	i := args.LastIncludedIndex - rf.lastSnapshotIndex
 	if i >= 0 && i < len(rf.log) && rf.log[i].Term == args.LastIncludedTerm {
+		rf.resetElectionTimeOutLocked()
 		return
 	}
 	rf.snapshot = args.Data
@@ -556,7 +558,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if leaderTerm > rf.currentTerm || rf.state != FOLLOWER {
 		rf.convertToFollowerLocked(leaderTerm)
 	}
-	if args.PrevLogIndex >= len(rf.log)+rf.lastSnapshotIndex {
+	if args.PrevLogIndex >= len(rf.log)+rf.lastSnapshotIndex ||
+		args.PrevLogIndex < rf.lastSnapshotIndex {
 		reply.ConflictTerm = -1
 		reply.ConflictIndex = len(rf.log) + rf.lastSnapshotIndex
 		reply.Success = false
