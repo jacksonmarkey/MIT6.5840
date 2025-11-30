@@ -82,11 +82,27 @@ func (kv *KVServer) DoOp(req any) any {
 
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
-	return nil
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	kv.mu.Lock()
+	if e.Encode(kv.store) != nil {
+		fmt.Println("Encoding error!")
+	}
+	kv.mu.Unlock()
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
 	// Your code here
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var store map[string]VersionedValue
+	if d.Decode(&store) != nil {
+		fmt.Println("Decoding error!")
+	}
+	kv.mu.Lock()
+	kv.store = store
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
