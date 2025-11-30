@@ -12,8 +12,8 @@ import (
 )
 
 type VersionedValue struct {
-	value   string
-	version rpc.Tversion
+	Value   string
+	Version rpc.Tversion
 }
 
 type KVServer struct {
@@ -41,8 +41,8 @@ func (kv *KVServer) DoOp(req any) any {
 		v, ok := kv.store[args.Key]
 		kv.mu.Unlock()
 		if ok {
-			reply.Value = v.value
-			reply.Version = v.version
+			reply.Value = v.Value
+			reply.Version = v.Version
 			reply.Err = rpc.OK
 		} else {
 			reply.Err = rpc.ErrNoKey
@@ -62,16 +62,16 @@ func (kv *KVServer) DoOp(req any) any {
 				return reply
 			}
 			kv.store[args.Key] = VersionedValue{
-				value:   args.Value,
-				version: rpc.Tversion(1),
+				Value:   args.Value,
+				Version: rpc.Tversion(1),
 			}
 			reply.Err = rpc.OK
-		case v.version != args.Version:
+		case v.Version != args.Version:
 			reply.Err = rpc.ErrVersion
 		default:
 			kv.store[args.Key] = VersionedValue{
-				value:   args.Value,
-				version: v.version + 1,
+				Value:   args.Value,
+				Version: v.Version + 1,
 			}
 			reply.Err = rpc.OK
 		}
