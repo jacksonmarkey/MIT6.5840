@@ -439,7 +439,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	close(rf.applyCh)
+	// fmt.Printf("[%v] Killed", rf.me)
+	// close(rf.applyCh)
 	close(rf.notifyApplyCh)
 }
 
@@ -481,6 +482,7 @@ func (rf *Raft) notifyApplier() {
 }
 
 func (rf *Raft) applyMsgTicker() {
+	defer close(rf.applyCh)
 	for rf.killed() == false {
 		select {
 		case <-rf.notifyApplyCh:
@@ -494,7 +496,7 @@ func (rf *Raft) applyMsgTicker() {
 		rf.mu.Lock()
 		var msgQueue = make([]raftapi.ApplyMsg, 0)
 		if rf.hasSnapshotToApply {
-			DPrintf("Applying snapshot...")
+			DPrintf("[%v] Applying snapshot...", rf.me)
 			msgQueue = append(msgQueue, raftapi.ApplyMsg{
 				SnapshotValid: true,
 				Snapshot:      rf.snapshot,
@@ -514,6 +516,9 @@ func (rf *Raft) applyMsgTicker() {
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
 		for _, msg := range msgQueue {
+			if rf.killed() {
+				return
+			}
 			rf.applyCh <- msg
 		}
 	}

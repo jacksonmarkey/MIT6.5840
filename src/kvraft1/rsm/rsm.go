@@ -11,7 +11,11 @@ import (
 	tester "6.5840/tester1"
 )
 
-const SUBMIT_TIMEOUT = 2000
+const (
+	SUBMIT_TIMEOUT     = 2000
+	SNAPSHOT_THRESHOLD = 0.75
+	SNAPSHOT_INTERVAL  = 50
+)
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
 
@@ -52,6 +56,7 @@ type RSM struct {
 	idCounter   int
 	doOpResults map[int]chan OpResult
 	lastApplied int
+	killed      bool
 }
 
 // servers[] contains the ports of the set of
@@ -80,7 +85,12 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+	snap := persister.ReadSnapshot()
+	if len(snap) > 0 {
+		rsm.sm.Restore(snap)
+	}
 	go rsm.reader()
+	go rsm.persistTicker()
 	return rsm
 }
 
@@ -88,12 +98,30 @@ func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
 
+func (rsm *RSM) persistTicker() {
+	if rsm.maxraftstate == -1 {
+		return
+	}
+	for rsm.killed == false {
+		// fmt.Printf("[%v] RSM (size(%v) > thresh(%v))\n", rsm.me, rsm.Raft().PersistBytes(), int(float64(rsm.maxraftstate)*SNAPSHOT_THRESHOLD))
+		if rsm.Raft().PersistBytes() > int(float64(rsm.maxraftstate)*SNAPSHOT_THRESHOLD) {
+			// fmt.Printf("[%v] RSM trimming (size(%v) > thresh(%v))\n", rsm.me, rsm.Raft().PersistBytes(), int(float64(rsm.maxraftstate)*SNAPSHOT_THRESHOLD))
+			rsm.mu.Lock()
+			lastApplied := rsm.lastApplied
+			snap := rsm.sm.Snapshot()
+			rsm.mu.Unlock()
+			rsm.Raft().Snapshot(lastApplied, snap)
+		}
+		time.Sleep(SNAPSHOT_INTERVAL * time.Millisecond)
+	}
+}
+
 func (rsm *RSM) reader() {
 	// fmt.Println("Reader")
 	for msg := range rsm.applyCh {
-		// fmt.Printf("[%v] Reading %+v\n", rsm.me, msg)
 		if msg.CommandValid {
 			op := msg.Command.(Op)
+			rsm.mu.Lock()
 			if msg.CommandIndex <= rsm.lastApplied {
 				continue
 			}
@@ -103,7 +131,6 @@ func (rsm *RSM) reader() {
 				op:     op,
 				result: result,
 			}
-			rsm.mu.Lock()
 			resultCh, ok := rsm.doOpResults[msg.CommandIndex]
 			if ok {
 				resultCh <- opResult
@@ -111,7 +138,19 @@ func (rsm *RSM) reader() {
 			}
 			rsm.mu.Unlock()
 		}
+		if msg.SnapshotValid {
+			raft.DPrintf("[%v]RSM -< applyMsg %+v\n", rsm.me, msg)
+			rsm.mu.Lock()
+			if msg.SnapshotIndex <= rsm.lastApplied {
+				rsm.mu.Unlock()
+				continue
+			}
+			rsm.sm.Restore(msg.Snapshot)
+			rsm.mu.Unlock()
+		}
+		// fmt.Println("Done")
 	}
+	rsm.killed = true
 }
 
 // Submit a command to Raft, and wait for it to be committed.  It
