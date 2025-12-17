@@ -212,10 +212,12 @@ func (rf *Raft) ApplySnapshot(args *ApplySnapshotArgs, reply *ApplySnapshotReply
 		rf.convertToFollowerLocked(args.Term)
 	}
 	if args.LastIncludedIndex <= rf.commitIndex {
+		rf.resetElectionTimeOutLocked()
 		return
 	}
 	i := args.LastIncludedIndex - rf.lastSnapshotIndex
 	if i >= 0 && i < len(rf.log) && rf.log[i].Term == args.LastIncludedTerm {
+		rf.resetElectionTimeOutLocked()
 		return
 	}
 	rf.snapshot = args.Data
@@ -439,7 +441,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	close(rf.applyCh)
+	// fmt.Printf("[%v] Killed", rf.me)
+	// close(rf.applyCh)
 	close(rf.notifyApplyCh)
 }
 
@@ -472,6 +475,9 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) notifyApplier() {
+	if rf.killed() {
+		return
+	}
 	select {
 	case rf.notifyApplyCh <- struct{}{}:
 		// Successfully sent notification
@@ -481,6 +487,7 @@ func (rf *Raft) notifyApplier() {
 }
 
 func (rf *Raft) applyMsgTicker() {
+	defer close(rf.applyCh)
 	for rf.killed() == false {
 		select {
 		case <-rf.notifyApplyCh:
@@ -494,7 +501,7 @@ func (rf *Raft) applyMsgTicker() {
 		rf.mu.Lock()
 		var msgQueue = make([]raftapi.ApplyMsg, 0)
 		if rf.hasSnapshotToApply {
-			DPrintf("Applying snapshot...")
+			DPrintf("[%v] Applying snapshot...", rf.me)
 			msgQueue = append(msgQueue, raftapi.ApplyMsg{
 				SnapshotValid: true,
 				Snapshot:      rf.snapshot,
@@ -514,7 +521,13 @@ func (rf *Raft) applyMsgTicker() {
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
 		for _, msg := range msgQueue {
+			if rf.killed() {
+				return
+			}
 			rf.applyCh <- msg
+			// if msg.SnapshotValid {
+			// 	DPrintf("[%v] Applied snapshot!", rf.me)
+			// }
 		}
 	}
 }
@@ -551,7 +564,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if leaderTerm > rf.currentTerm || rf.state != FOLLOWER {
 		rf.convertToFollowerLocked(leaderTerm)
 	}
-	if args.PrevLogIndex >= len(rf.log)+rf.lastSnapshotIndex {
+	if args.PrevLogIndex >= len(rf.log)+rf.lastSnapshotIndex ||
+		args.PrevLogIndex < rf.lastSnapshotIndex {
 		reply.ConflictTerm = -1
 		reply.ConflictIndex = len(rf.log) + rf.lastSnapshotIndex
 		reply.Success = false

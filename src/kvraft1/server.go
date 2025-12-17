@@ -1,6 +1,8 @@
 package kvraft
 
 import (
+	"bytes"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -12,8 +14,8 @@ import (
 )
 
 type VersionedValue struct {
-	value   string
-	version rpc.Tversion
+	Value   string
+	Version rpc.Tversion
 }
 
 type KVServer struct {
@@ -41,8 +43,8 @@ func (kv *KVServer) DoOp(req any) any {
 		v, ok := kv.store[args.Key]
 		kv.mu.Unlock()
 		if ok {
-			reply.Value = v.value
-			reply.Version = v.version
+			reply.Value = v.Value
+			reply.Version = v.Version
 			reply.Err = rpc.OK
 		} else {
 			reply.Err = rpc.ErrNoKey
@@ -62,16 +64,16 @@ func (kv *KVServer) DoOp(req any) any {
 				return reply
 			}
 			kv.store[args.Key] = VersionedValue{
-				value:   args.Value,
-				version: rpc.Tversion(1),
+				Value:   args.Value,
+				Version: rpc.Tversion(1),
 			}
 			reply.Err = rpc.OK
-		case v.version != args.Version:
+		case v.Version != args.Version:
 			reply.Err = rpc.ErrVersion
 		default:
 			kv.store[args.Key] = VersionedValue{
-				value:   args.Value,
-				version: v.version + 1,
+				Value:   args.Value,
+				Version: v.Version + 1,
 			}
 			reply.Err = rpc.OK
 		}
@@ -82,11 +84,27 @@ func (kv *KVServer) DoOp(req any) any {
 
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
-	return nil
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	kv.mu.Lock()
+	if e.Encode(kv.store) != nil {
+		fmt.Println("Encoding error!")
+	}
+	kv.mu.Unlock()
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
 	// Your code here
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var store map[string]VersionedValue
+	if d.Decode(&store) != nil {
+		fmt.Println("Decoding error!")
+	}
+	kv.mu.Lock()
+	kv.store = store
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
@@ -158,6 +176,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.
+	kv.mu.Lock()
 	kv.store = make(map[string]VersionedValue)
+	kv.mu.Unlock()
 	return []tester.IService{kv, kv.rsm.Raft()}
 }
