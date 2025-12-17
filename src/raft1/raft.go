@@ -475,6 +475,9 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) notifyApplier() {
+	if rf.killed() {
+		return
+	}
 	select {
 	case rf.notifyApplyCh <- struct{}{}:
 		// Successfully sent notification
@@ -522,6 +525,9 @@ func (rf *Raft) applyMsgTicker() {
 				return
 			}
 			rf.applyCh <- msg
+			// if msg.SnapshotValid {
+			// 	DPrintf("[%v] Applied snapshot!", rf.me)
+			// }
 		}
 	}
 }

@@ -2,6 +2,7 @@ package rsm
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
@@ -56,7 +57,7 @@ type RSM struct {
 	idCounter   int
 	doOpResults map[int]chan OpResult
 	lastApplied int
-	killed      bool
+	dead        int32
 }
 
 // servers[] contains the ports of the set of
@@ -98,11 +99,20 @@ func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
 
+func (rsm *RSM) Kill() {
+	atomic.StoreInt32(&rsm.dead, 1)
+}
+
+func (rsm *RSM) killed() bool {
+	z := atomic.LoadInt32(&rsm.dead)
+	return z == 1
+}
+
 func (rsm *RSM) persistTicker() {
 	if rsm.maxraftstate == -1 {
 		return
 	}
-	for rsm.killed == false {
+	for rsm.killed() == false {
 		// fmt.Printf("[%v] RSM (size(%v) > thresh(%v))\n", rsm.me, rsm.Raft().PersistBytes(), int(float64(rsm.maxraftstate)*SNAPSHOT_THRESHOLD))
 		if rsm.Raft().PersistBytes() > int(float64(rsm.maxraftstate)*SNAPSHOT_THRESHOLD) {
 			// fmt.Printf("[%v] RSM trimming (size(%v) > thresh(%v))\n", rsm.me, rsm.Raft().PersistBytes(), int(float64(rsm.maxraftstate)*SNAPSHOT_THRESHOLD))
@@ -150,7 +160,7 @@ func (rsm *RSM) reader() {
 		}
 		// fmt.Println("Done")
 	}
-	rsm.killed = true
+	rsm.Kill()
 }
 
 // Submit a command to Raft, and wait for it to be committed.  It

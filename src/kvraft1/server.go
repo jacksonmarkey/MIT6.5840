@@ -1,6 +1,8 @@
 package kvraft
 
 import (
+	"bytes"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -174,6 +176,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.
+	kv.mu.Lock()
 	kv.store = make(map[string]VersionedValue)
+	kv.mu.Unlock()
 	return []tester.IService{kv, kv.rsm.Raft()}
 }
