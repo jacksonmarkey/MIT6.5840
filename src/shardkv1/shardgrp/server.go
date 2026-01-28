@@ -1,17 +1,23 @@
 package shardgrp
 
 import (
+	"bytes"
+	"fmt"
+	"sync"
 	"sync/atomic"
-
 
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/shardkv1/shardgrp/shardrpc"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
+type VersionedValue struct {
+	Value   string
+	Version rpc.Tversion
+}
 
 type KVServer struct {
 	me   int
@@ -20,30 +26,114 @@ type KVServer struct {
 	gid  tester.Tgid
 
 	// Your code here
+	mu    sync.Mutex
+	store map[string]VersionedValue
 }
-
 
 func (kv *KVServer) DoOp(req any) any {
 	// Your code here
+	switch args := req.(type) {
+	case rpc.GetArgs:
+		reply := rpc.GetReply{}
+		kv.mu.Lock()
+		v, ok := kv.store[args.Key]
+		kv.mu.Unlock()
+		if ok {
+			reply.Value = v.Value
+			reply.Version = v.Version
+			reply.Err = rpc.OK
+		} else {
+			reply.Err = rpc.ErrNoKey
+		}
+		return reply
+	case rpc.PutArgs:
+		// fmt.Println("PutArgs!")
+		reply := rpc.PutReply{}
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		v, ok := kv.store[args.Key]
+		// fmt.Printf("v=%+v, ok=%v\n", v, ok)
+		switch {
+		case !ok:
+			if args.Version != 0 {
+				reply.Err = rpc.ErrNoKey
+				return reply
+			}
+			kv.store[args.Key] = VersionedValue{
+				Value:   args.Value,
+				Version: rpc.Tversion(1),
+			}
+			reply.Err = rpc.OK
+		case v.Version != args.Version:
+			reply.Err = rpc.ErrVersion
+		default:
+			kv.store[args.Key] = VersionedValue{
+				Value:   args.Value,
+				Version: v.Version + 1,
+			}
+			reply.Err = rpc.OK
+		}
+		return reply
+	}
 	return nil
 }
 
-
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
-	return nil
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	kv.mu.Lock()
+	if e.Encode(kv.store) != nil {
+		fmt.Println("Encoding error!")
+	}
+	kv.mu.Unlock()
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
 	// Your code here
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var store map[string]VersionedValue
+	if d.Decode(&store) != nil {
+		fmt.Println("Decoding error!")
+	}
+	kv.mu.Lock()
+	kv.store = store
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// Your code here
+	// fmt.Printf("Submitting... %v\n", args)
+	err, submitResult := kv.rsm.Submit(*args)
+	// fmt.Printf("Submitted... %v\n", args)
+	if err == rpc.ErrWrongLeader {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	result, ok := submitResult.(rpc.GetReply)
+	if ok {
+		reply.Err = result.Err
+		reply.Value = result.Value
+		reply.Version = result.Version
+	}
 }
 
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// Your code here
+	// fmt.Printf("Submitting... %v\n", args)
+	err, submitResult := kv.rsm.Submit(*args)
+	// fmt.Printf("Submitted... %v\n", args)
+	// fmt.Printf("err=%v, submitResult=%+v\n", err, submitResult)
+	if err == rpc.ErrWrongLeader {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	result, ok := submitResult.(rpc.PutReply)
+	if ok {
+		reply.Err = result.Err
+	}
 }
 
 // Freeze the specified shard (i.e., reject future Get/Puts for this
@@ -98,6 +188,6 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 
 	// Your code here
-
+	kv.store = make(map[string]VersionedValue)
 	return []tester.IService{kv, kv.rsm.Raft()}
 }
