@@ -199,7 +199,7 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 		if !isLeader || currentTerm != startTerm {
 			return rpc.ErrWrongLeader, nil
 		}
-		if opResult.op == op {
+		if (opResult.op.Id == op.Id) && (opResult.op.Me == op.Me) {
 			return rpc.OK, opResult.result
 		}
 	case <-time.After(SUBMIT_TIMEOUT * time.Millisecond):
