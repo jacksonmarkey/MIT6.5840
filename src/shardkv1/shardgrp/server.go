@@ -10,6 +10,7 @@ import (
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labgob"
 	"6.5840/labrpc"
+	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardgrp/shardrpc"
 	tester "6.5840/tester1"
 )
@@ -26,8 +27,10 @@ type KVServer struct {
 	gid  tester.Tgid
 
 	// Your code here
-	mu    sync.Mutex
-	store map[string]VersionedValue
+	mu             sync.Mutex
+	store          map[string]VersionedValue
+	frozen         [shardcfg.NShards]bool
+	lastCfgVersion [shardcfg.NShards]shardcfg.Tnum
 }
 
 func (kv *KVServer) DoOp(req any) any {
@@ -51,6 +54,12 @@ func (kv *KVServer) DoOp(req any) any {
 		reply := rpc.PutReply{}
 		kv.mu.Lock()
 		defer kv.mu.Unlock()
+		if kv.frozen[shardcfg.Key2Shard(args.Key)] {
+			// Reject Puts on frozen shard
+			// TODO: what error code here?
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
 		v, ok := kv.store[args.Key]
 		// fmt.Printf("v=%+v, ok=%v\n", v, ok)
 		switch {
@@ -71,6 +80,83 @@ func (kv *KVServer) DoOp(req any) any {
 				Value:   args.Value,
 				Version: v.Version + 1,
 			}
+			reply.Err = rpc.OK
+		}
+		return reply
+	case shardrpc.FreezeShardArgs:
+		reply := shardrpc.FreezeShardReply{}
+		kv.mu.Lock()
+		lastSeenShardCfg := kv.lastCfgVersion[args.Shard]
+		if args.Num <= lastSeenShardCfg {
+			// Ignore stale RPC
+			// TODO: Send rpc.OK or rpc.Err here?
+			kv.mu.Unlock()
+			reply.Err = rpc.ErrVersion
+			reply.Num = lastSeenShardCfg
+		} else {
+			// Mark as frozen and send copy of map to controller
+			kv.frozen[args.Shard] = true
+			kv.lastCfgVersion[args.Shard] = args.Num
+			shardMapCopy := make(map[string]VersionedValue)
+			for k, vv := range kv.store {
+				if shardcfg.Key2Shard(k) == args.Shard {
+					shardMapCopy[k] = vv
+				}
+			}
+			kv.mu.Unlock()
+			// Encode copy of map
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			if e.Encode(shardMapCopy) != nil {
+				fmt.Println("Encoding error!")
+			}
+			reply.State = w.Bytes()
+			reply.Err = rpc.OK
+			reply.Num = args.Num
+		}
+		return reply
+	case shardrpc.InstallShardArgs:
+		reply := shardrpc.InstallShardReply{}
+		kv.mu.Lock()
+		lastSeenShardCfg := kv.lastCfgVersion[args.Shard]
+		if args.Num <= lastSeenShardCfg {
+			// Ignore stale RPC
+			// TODO: Send rpc.OK or rpc.Err here?
+			kv.mu.Unlock()
+			reply.Err = rpc.ErrVersion
+		} else {
+			kv.lastCfgVersion[args.Shard] = args.Num
+			r := bytes.NewBuffer(args.State)
+			d := labgob.NewDecoder(r)
+			var shardStore map[string]VersionedValue
+			if d.Decode(&shardStore) != nil {
+				fmt.Println("Decoding error!")
+			}
+			for k, vv := range shardStore {
+				kv.store[k] = vv
+			}
+			kv.mu.Unlock()
+			reply.Err = rpc.OK
+		}
+		return reply
+	case shardrpc.DeleteShardArgs:
+		reply := shardrpc.DeleteShardReply{}
+		kv.mu.Lock()
+		lastSeenShardCfg := kv.lastCfgVersion[args.Shard]
+		if args.Num < lastSeenShardCfg {
+			// Ignore stale RPC
+			// TODO: Send rpc.OK or rpc.Err here?
+			kv.mu.Unlock()
+			reply.Err = rpc.ErrVersion
+		} else {
+			kv.lastCfgVersion[args.Shard] = args.Num
+			for k := range kv.store {
+				if shardcfg.Key2Shard(k) == args.Shard {
+					delete(kv.store, k)
+				}
+			}
+			kv.frozen[args.Shard] = false
+			kv.mu.Unlock()
 			reply.Err = rpc.OK
 		}
 		return reply
@@ -140,16 +226,50 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 // shard) and return the key/values stored in that shard.
 func (kv *KVServer) FreezeShard(args *shardrpc.FreezeShardArgs, reply *shardrpc.FreezeShardReply) {
 	// Your code here
+	// fmt.Printf("Submitting... %v\n", args)
+	err, submitResult := kv.rsm.Submit(*args)
+	// fmt.Printf("Submitted... %v\n", args)
+	if err == rpc.ErrWrongLeader {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	result, ok := submitResult.(shardrpc.FreezeShardReply)
+	if ok {
+		reply.State = result.State
+		reply.Num = result.Num
+		reply.Err = result.Err
+	}
+
 }
 
 // Install the supplied state for the specified shard.
 func (kv *KVServer) InstallShard(args *shardrpc.InstallShardArgs, reply *shardrpc.InstallShardReply) {
 	// Your code here
+	err, submitResult := kv.rsm.Submit(*args)
+	// fmt.Printf("Submitted... %v\n", args)
+	if err == rpc.ErrWrongLeader {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	result, ok := submitResult.(shardrpc.InstallShardReply)
+	if ok {
+		reply.Err = result.Err
+	}
 }
 
 // Delete the specified shard.
 func (kv *KVServer) DeleteShard(args *shardrpc.DeleteShardArgs, reply *shardrpc.DeleteShardReply) {
-	// Your code here
+	// Your code
+	err, submitResult := kv.rsm.Submit(*args)
+	// fmt.Printf("Submitted... %v\n", args)
+	if err == rpc.ErrWrongLeader {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	result, ok := submitResult.(shardrpc.DeleteShardReply)
+	if ok {
+		reply.Err = result.Err
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't

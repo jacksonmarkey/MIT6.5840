@@ -5,10 +5,13 @@ package shardctrler
 //
 
 import (
+	"sync"
+
 	kvsrv "6.5840/kvsrv1"
 	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
 	"6.5840/shardkv1/shardcfg"
+	"6.5840/shardkv1/shardgrp"
 	tester "6.5840/tester1"
 )
 
@@ -56,6 +59,52 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	// Your code here.
+	s, cver, err := sck.IKVClerk.Get(CONFIG_KEY)
+	for err != rpc.OK {
+		s, _, err = sck.IKVClerk.Get(CONFIG_KEY)
+	}
+	existingCfg := shardcfg.FromString(s)
+	if new.Num <= existingCfg.Num {
+		return
+	}
+	var wg sync.WaitGroup
+	for shid, gid := range existingCfg.Shards {
+		newgid := new.Shards[shid]
+		if gid != newgid {
+			wg.Add(1)
+			go func(shid shardcfg.Tshid, oldgid tester.Tgid, newgid tester.Tgid) {
+				defer wg.Done()
+				// 1. Freeze
+				_, oldsvrs, _ := existingCfg.GidServers(shid)
+				oldshclk := shardgrp.MakeClerk(sck.clnt, oldsvrs)
+				state, err := oldshclk.FreezeShard(shid, new.Num)
+				if err == rpc.ErrWrongGroup {
+					// Quit if the shardgrp is on a higher cfg version than we have
+					// TODO : or should we continue to unfreeze?
+					return
+				}
+				// 2. Install
+				_, newsvrs, _ := new.GidServers(shid)
+				newshclk := shardgrp.MakeClerk(sck.clnt, newsvrs)
+				err = newshclk.InstallShard(shid, state, new.Num)
+				if err == rpc.ErrWrongGroup {
+					// Quit if the shardgrp is on a higher cfg version than we have
+					return
+				}
+				// 3. Delete
+				err = oldshclk.DeleteShard(shid, new.Num)
+				// What do we do with this err?
+
+			}(shardcfg.Tshid(shid), gid, newgid)
+		}
+	}
+	wg.Wait()
+	// We currently wait for all shards to be successfully moved before updating cfg.
+	// This means that if one shardgrp is slow, we delay serving any other shards
+	// that have completed the move. This might be necessary for atomic cfg updates,
+	// but seems undesirable for reliability.
+	// TODO: For part B, save intermittent progress in case controller fails
+	err = sck.IKVClerk.Put(CONFIG_KEY, new.String(), cver)
 }
 
 // Return the current configuration

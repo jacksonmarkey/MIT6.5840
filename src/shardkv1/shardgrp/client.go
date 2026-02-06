@@ -6,6 +6,7 @@ import (
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/shardkv1/shardcfg"
+	"6.5840/shardkv1/shardgrp/shardrpc"
 	tester "6.5840/tester1"
 )
 
@@ -111,15 +112,123 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 
 func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.Err) {
 	// Your code here
-	return nil, ""
+	args := shardrpc.FreezeShardArgs{
+		Shard: s,
+		Num:   num,
+	}
+	reply := shardrpc.FreezeShardReply{}
+	ck.mu.Lock()
+	lastKnownLeader := ck.currentLeader
+	nextTryServer := lastKnownLeader
+	ck.mu.Unlock()
+	// fmt.Printf("(client)->[%v](server) sending Freeze%+v\n", nextTryServer, args)
+	ok := ck.clnt.Call(ck.servers[nextTryServer], "KVServer.FreezeShard", &args, &reply)
+	for !ok || reply.Err == rpc.ErrWrongLeader {
+		// TODO: Should we create new args and reply objects in case an old server
+		// with a pointer to the same args and reply overwrite those from the
+		// most recent one?
+		time.Sleep(RETRY_INTERVAL * time.Millisecond)
+		ck.mu.Lock()
+		// If another thread found a new leader and updated the Clerk, try that server
+		// Otherwise, cycle through the next leader
+		if ck.currentLeader != lastKnownLeader {
+			lastKnownLeader = ck.currentLeader
+			nextTryServer = lastKnownLeader
+		} else {
+			nextTryServer = (nextTryServer + 1) % len(ck.servers)
+		}
+		ck.mu.Unlock()
+		// fmt.Printf("(client)->[%v](server) sending Get%+v\n", nextTryServer, args)
+		ok = ck.clnt.Call(ck.servers[nextTryServer], "KVServer.FreezeShard", &args, &reply)
+	}
+	// fmt.Printf("(client)->[%v](server) success Get%+v\n", nextTryServer, reply)
+	ck.mu.Lock()
+	if ck.currentLeader != nextTryServer {
+		ck.currentLeader = nextTryServer
+	}
+	ck.mu.Unlock()
+	// TODO: Do something with reply.Num ?
+	return reply.State, reply.Err
 }
 
 func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum) rpc.Err {
-	// Your code here
-	return ""
+	args := shardrpc.InstallShardArgs{
+		Shard: s,
+		State: state,
+		Num:   num,
+	}
+	reply := shardrpc.InstallShardReply{}
+	ck.mu.Lock()
+	lastKnownLeader := ck.currentLeader
+	nextTryServer := lastKnownLeader
+	ck.mu.Unlock()
+	// fmt.Printf("(client)->[%v](server) sending Install%+v\n", nextTryServer, args)
+	ok := ck.clnt.Call(ck.servers[nextTryServer], "KVServer.InstallShard", &args, &reply)
+	for !ok || reply.Err == rpc.ErrWrongLeader {
+		// TODO: Should we create new args and reply objects in case an old server
+		// with a pointer to the same args and reply overwrite those from the
+		// most recent one?
+		time.Sleep(RETRY_INTERVAL * time.Millisecond)
+		ck.mu.Lock()
+		// If another thread found a new leader and updated the Clerk, try that server
+		// Otherwise, cycle through the next leader
+		if ck.currentLeader != lastKnownLeader {
+			lastKnownLeader = ck.currentLeader
+			nextTryServer = lastKnownLeader
+		} else {
+			nextTryServer = (nextTryServer + 1) % len(ck.servers)
+		}
+		ck.mu.Unlock()
+		// fmt.Printf("(client)->[%v](server) sending Install%+v\n", nextTryServer, args)
+		ok = ck.clnt.Call(ck.servers[nextTryServer], "KVServer.InstallShard", &args, &reply)
+	}
+	// fmt.Printf("(client)->[%v](server) success Install%+v\n", nextTryServer, reply)
+	ck.mu.Lock()
+	if ck.currentLeader != nextTryServer {
+		ck.currentLeader = nextTryServer
+	}
+	ck.mu.Unlock()
+	// TODO: Do something with reply.Num ?
+	return reply.Err
 }
 
 func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 	// Your code here
-	return ""
+	args := shardrpc.DeleteShardArgs{
+		Shard: s,
+		Num:   num,
+	}
+	reply := shardrpc.DeleteShardReply{}
+	ck.mu.Lock()
+	lastKnownLeader := ck.currentLeader
+	nextTryServer := lastKnownLeader
+	ck.mu.Unlock()
+	// fmt.Printf("(client)->[%v](server) sending Delete%+v\n", nextTryServer, args)
+	ok := ck.clnt.Call(ck.servers[nextTryServer], "KVServer.DeleteShard", &args, &reply)
+	for !ok || reply.Err == rpc.ErrWrongLeader {
+		// TODO: Should we create new args and reply objects in case an old server
+		// with a pointer to the same args and reply overwrite those from the
+		// most recent one?
+		time.Sleep(RETRY_INTERVAL * time.Millisecond)
+		ck.mu.Lock()
+		// If another thread found a new leader and updated the Clerk, try that server
+		// Otherwise, cycle through the next leader
+		if ck.currentLeader != lastKnownLeader {
+			lastKnownLeader = ck.currentLeader
+			nextTryServer = lastKnownLeader
+		} else {
+			nextTryServer = (nextTryServer + 1) % len(ck.servers)
+		}
+		ck.mu.Unlock()
+		// fmt.Printf("(client)->[%v](server) sending Delete%+v\n", nextTryServer, args)
+		ok = ck.clnt.Call(ck.servers[nextTryServer], "KVServer.DeleteShard", &args, &reply)
+	}
+	// fmt.Printf("(client)->[%v](server) success Delete%+v\n", nextTryServer, reply)
+	ck.mu.Lock()
+	if ck.currentLeader != nextTryServer {
+		ck.currentLeader = nextTryServer
+	}
+	ck.mu.Unlock()
+	// TODO: Do something with reply.Num ?
+	return reply.Err
 }
